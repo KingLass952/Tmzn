@@ -3,7 +3,7 @@
     "tmzn-scheduler": {
       "type": "stdio",
       "command": "node",
-      "args": ["/workspaces/Tmzn/timezone-scheduler-mcp/build/index.js"]
+      "args": ["${workspaceFolder}/timezone-scheduler-mcp/build/index.js"]
     }
   }
 }
