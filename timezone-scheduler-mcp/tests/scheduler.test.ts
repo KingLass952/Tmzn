@@ -13,8 +13,8 @@ test("calculates working-hour overlap using the selected date's timezone offsets
   });
 
   assert.equal(result.overlap?.duration_minutes, 480);
-  assert.equal(result.overlap?.source_local, "Jan 15, 2026, 9:00 AM – Jan 15, 2026, 5:00 PM");
-  assert.equal(result.overlap?.target_local, "Jan 15, 2026, 1:00 AM – Jan 15, 2026, 9:00 AM");
+  assert.equal(result.overlap?.source_local, "Thu, Jan 15, 9:00 AM CAT – Thu, Jan 15, 5:00 PM CAT");
+  assert.equal(result.overlap?.target_local, "Thu, Jan 15, 1:00 AM CST – Thu, Jan 15, 9:00 AM CST");
 });
 
 test("uses daylight saving offsets for summer dates", () => {
@@ -40,7 +40,7 @@ test("formats client slots with Johannesburg time alongside them", () => {
     hour_format: "12",
   });
 
-  assert.match(slot.source_local, /4:00 PM \(CAT\)/);
-  assert.match(slot.target_local, /8:00 AM/);
-  assert.match(slot.target_end_local, /8:30 AM/);
+  assert.match(slot.source_local, /4:00 PM CAT/);
+  assert.match(slot.target_local, /8:00 AM CST/);
+  assert.match(slot.target_end_local, /8:30 AM CST/);
 });

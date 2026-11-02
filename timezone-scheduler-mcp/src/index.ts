@@ -17,8 +17,8 @@ type WindowInput = {
   target_timezone: string;
   working_hours: string;
   target_working_hours?: string;
-  date: string;
-  min_overlap_minutes: number;
+  date?: string;
+  min_overlap_minutes?: number;
 };
 
 const localDateTimeFormatter = (timeZone: string) =>
@@ -86,6 +86,17 @@ function parseClock(value: string): Pick<LocalDateTime, "hour" | "minute"> {
   return { hour, minute };
 }
 
+export function dateInTimezone(now: Date, timeZone: string): string {
+  const { year, month, day } = localParts(now, timeZone);
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function shiftDate(date: string, days: number): string {
+  const { year, month, day } = parseDate(date);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return `${String(shifted.getUTCFullYear()).padStart(4, "0")}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
+
 function localToInstant(parts: LocalDateTime, timeZone: string): Date {
   const expected = Date.UTC(
     parts.year,
@@ -122,54 +133,84 @@ function intervalFor(
   const startTime = parseClock(match[1]);
   const endTime = parseClock(match[2]);
   const start = localToInstant({ ...calendarDate, ...startTime, second: 0 }, timeZone);
-  const end = localToInstant({ ...calendarDate, ...endTime, second: 0 }, timeZone);
-  if (end <= start) throw new Error("Working hours must end after they start on the same day");
+  const startMinutes = startTime.hour * 60 + startTime.minute;
+  const endMinutes = endTime.hour * 60 + endTime.minute;
+  const endDate = endMinutes <= startMinutes ? shiftDate(date, 1) : date;
+  const end = localToInstant({ ...parseDate(endDate), ...endTime, second: 0 }, timeZone);
   return { start, end };
 }
 
 function formatLocal(date: Date, timeZone: string, hourFormat: "12" | "24" = "12"): string {
-  return new Intl.DateTimeFormat("en-US", {
+  const johannesburg = timeZone === "Africa/Johannesburg";
+  const formatted = new Intl.DateTimeFormat("en-US", {
     timeZone,
-    year: "numeric",
+    weekday: "short",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    ...(johannesburg ? {} : { timeZoneName: "short" as const }),
     ...(hourFormat === "12" ? { hour12: true } : { hourCycle: "h23" }),
   }).format(date);
-}
-
-function displayTimezoneLabel(timeZone: string): string {
-  return timeZone === "Africa/Johannesburg" ? "CAT" : timeZone;
+  return johannesburg ? `${formatted} CAT` : formatted;
 }
 
 export function convertWindow(input: WindowInput) {
-  const source = intervalFor(input.date, input.working_hours, input.source_timezone);
-  const target = input.target_working_hours
-    ? intervalFor(input.date, input.target_working_hours, input.target_timezone)
-    : undefined;
-  const start = target && target.start > source.start ? target.start : source.start;
-  const end = target && target.end < source.end ? target.end : source.end;
-  const durationMinutes = Math.max(0, Math.floor((end.getTime() - start.getTime()) / 60_000));
-  const qualifies = durationMinutes >= input.min_overlap_minutes && durationMinutes > 0;
-  const overlap = qualifies
-    ? {
-        start_utc: start.toISOString(),
-        end_utc: end.toISOString(),
-        duration_minutes: durationMinutes,
-        source_local: `${formatLocal(start, input.source_timezone)} – ${formatLocal(end, input.source_timezone)}`,
-        target_local: `${formatLocal(start, input.target_timezone)} – ${formatLocal(end, input.target_timezone)}`,
-      }
-    : null;
+  const date = input.date ?? dateInTimezone(new Date(), input.source_timezone);
+  const minOverlapMinutes = input.min_overlap_minutes ?? 0;
+  const source = intervalFor(date, input.working_hours, input.source_timezone);
+  const targetWorkingHours = input.target_working_hours ?? input.working_hours;
+  const overlaps: Array<{
+    target_date: string;
+    start_utc: string;
+    end_utc: string;
+    duration_minutes: number;
+    source_local: string;
+    target_local: string;
+  }> = [];
+
+  for (let dayOffset = -2; dayOffset <= 2; dayOffset += 1) {
+    const targetDate = shiftDate(date, dayOffset);
+    let target: { start: Date; end: Date };
+    try {
+      target = intervalFor(targetDate, targetWorkingHours, input.target_timezone);
+    } catch (error) {
+      const isClockGap = error instanceof Error && error.message.startsWith("Local time does not exist");
+      if (dayOffset !== 0 && isClockGap) continue;
+      throw error;
+    }
+
+    const start = target.start > source.start ? target.start : source.start;
+    const end = target.end < source.end ? target.end : source.end;
+    const durationMinutes = Math.floor((end.getTime() - start.getTime()) / 60_000);
+    if (durationMinutes <= 0 || durationMinutes < minOverlapMinutes) continue;
+
+    overlaps.push({
+      target_date: targetDate,
+      start_utc: start.toISOString(),
+      end_utc: end.toISOString(),
+      duration_minutes: durationMinutes,
+      source_local: `${formatLocal(start, input.source_timezone)} – ${formatLocal(end, input.source_timezone)}`,
+      target_local: `${formatLocal(start, input.target_timezone)} – ${formatLocal(end, input.target_timezone)}`,
+    });
+  }
+
+  overlaps.sort((left, right) => left.start_utc.localeCompare(right.start_utc));
+  const overlap = overlaps.reduce<(typeof overlaps)[number] | null>(
+    (longest, candidate) =>
+      longest === null || candidate.duration_minutes > longest.duration_minutes ? candidate : longest,
+    null,
+  );
 
   return {
-    date: input.date,
+    date,
     source_timezone: input.source_timezone,
     target_timezone: input.target_timezone,
     source_working_hours: input.working_hours,
-    target_working_hours: input.target_working_hours ?? null,
-    min_overlap_minutes: input.min_overlap_minutes,
+    target_working_hours: targetWorkingHours,
+    min_overlap_minutes: minOverlapMinutes,
     overlap,
+    overlaps,
   };
 }
 
@@ -188,9 +229,9 @@ export function formatPitchTimes(input: {
     const start = localToInstant({ ...date, ...time, second: 0 }, input.source_timezone);
     const end = new Date(start.getTime() + input.duration_minutes * 60_000);
     return {
-      source_local: `${formatLocal(start, input.source_timezone, input.hour_format)} (${displayTimezoneLabel(input.source_timezone)})`,
-      target_local: `${formatLocal(start, input.target_timezone, input.hour_format)} (${displayTimezoneLabel(input.target_timezone)})`,
-      target_end_local: `${formatLocal(end, input.target_timezone, input.hour_format)} (${displayTimezoneLabel(input.target_timezone)})`,
+      source_local: formatLocal(start, input.source_timezone, input.hour_format),
+      target_local: formatLocal(start, input.target_timezone, input.hour_format),
+      target_end_local: formatLocal(end, input.target_timezone, input.hour_format),
       start_utc: start.toISOString(),
     };
   });
@@ -202,7 +243,7 @@ server.registerTool(
   "convert_window",
   {
     description:
-      "Find the overlap between local working hours in two timezones for a specific date, accounting for daylight saving time.",
+      "Find every overlap between local working hours in two timezones, including overnight hours and neighboring calendar dates, accounting for daylight saving time. The overlap field contains the longest result.",
     inputSchema: {
       source_timezone: z.string().describe("IANA sender timezone, such as Africa/Johannesburg"),
       target_timezone: z.string().describe("IANA client timezone, such as America/Chicago"),
@@ -210,9 +251,9 @@ server.registerTool(
       target_working_hours: z
         .string()
         .optional()
-        .describe("Optional client hours in 24-hour HH:MM-HH:MM format"),
-      date: z.string().optional().describe("Local calendar date in YYYY-MM-DD format"),
-      min_overlap_minutes: z.number().int().nonnegative().optional(),
+        .describe("Client hours in HH:MM-HH:MM format; defaults to working_hours"),
+      date: z.string().optional().describe("Sender-local date in YYYY-MM-DD format; defaults to today there"),
+      min_overlap_minutes: z.number().int().nonnegative().optional().describe("Minimum duration for each overlap; defaults to 0"),
     },
   },
   async ({ source_timezone, target_timezone, working_hours, target_working_hours, date, min_overlap_minutes }) => {
@@ -222,11 +263,11 @@ server.registerTool(
         target_timezone,
         working_hours,
         target_working_hours,
-        date: date ?? new Date().toISOString().slice(0, 10),
-        min_overlap_minutes: min_overlap_minutes ?? 0,
+        date,
+        min_overlap_minutes,
       });
-      const text = result.overlap
-        ? `Overlap: ${result.overlap.duration_minutes} minutes\n${displayTimezoneLabel(source_timezone)}: ${result.overlap.source_local}\n${displayTimezoneLabel(target_timezone)}: ${result.overlap.target_local}\n\nJSON:\n${JSON.stringify(result, null, 2)}`
+      const text = result.overlaps.length > 0
+        ? `${result.overlaps.map((item) => `Overlap: ${item.duration_minutes} minutes\nSender: ${item.source_local}\nClient: ${item.target_local}`).join("\n\n")}\n\nJSON:\n${JSON.stringify(result, null, 2)}`
         : `No overlap of at least ${result.min_overlap_minutes} minutes was found.\n\nJSON:\n${JSON.stringify(result, null, 2)}`;
       return { content: [{ type: "text", text }] };
     } catch (error) {
